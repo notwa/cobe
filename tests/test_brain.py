@@ -1,6 +1,6 @@
 from cobe.brain import Brain, CobeError
 from cobe.tokenizers import MegaHALTokenizer
-import cPickle as pickle
+import pickle as pickle
 import os
 import unittest
 
@@ -51,7 +51,7 @@ class testInit(unittest.TestCase):
 
         try:
             Brain(TEST_BRAIN_FILE)
-        except CobeError, e:
+        except CobeError as e:
             self.assert_("cannot read a version" in str(e))
         else:
             self.fail("opened a wrong version brain file")
