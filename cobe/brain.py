@@ -114,11 +114,6 @@ class Brain:
     def learn(self, text):
         """Learn a string of text. If the input is not already
         Unicode, it will be decoded as utf-8."""
-        if type(text) != str:
-            # Assume that non-Unicode text is encoded as utf-8, which
-            # should be somewhat safe in the modern world.
-            text = text.decode("utf-8", "ignore")
-
         tokens = self.tokenizer.split(text)
         trace("Brain.learn_input_token_count", len(tokens))
 
@@ -197,11 +192,6 @@ with its two nodes"""
     def reply(self, text, loop_ms=500, max_len=None):
         """Reply to a string of text. If the input is not already
         Unicode, it will be decoded as utf-8."""
-        if type(text) != str:
-            # Assume that non-Unicode text is encoded as utf-8, which
-            # should be somewhat safe in the modern world.
-            text = text.decode("utf-8", "ignore")
-
         tokens = self.tokenizer.split(text)
         input_ids = list(map(self.graph.get_token_by_text, tokens))
 

@@ -17,7 +17,6 @@ commands.ConsoleCommand.add_subparser(subparsers)
 commands.InitCommand.add_subparser(subparsers)
 commands.IrcClientCommand.add_subparser(subparsers)
 commands.LearnCommand.add_subparser(subparsers)
-commands.LearnIrcLogCommand.add_subparser(subparsers)
 commands.SetStemmerCommand.add_subparser(subparsers)
 commands.DelStemmerCommand.add_subparser(subparsers)
 

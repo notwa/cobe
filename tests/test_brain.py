@@ -95,10 +95,6 @@ class testInit(unittest.TestCase):
 
         db.set_info_text(key, pickle.dumps(obj))
 
-        # pickle cannot load from a unicode object
-        get_info_text = lambda: pickle.loads(db.get_info_text(key))
-        self.assertRaises(TypeError, get_info_text)
-
         get_info_text = lambda: pickle.loads(
             db.get_info_text(key, text_factory=str))
 

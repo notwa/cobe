@@ -25,9 +25,6 @@ class testMegaHALTokenizer(unittest.TestCase):
         words = self.tokenizer.split("http://www.google.com/")
         self.assertEquals(words, ["HTTP", "://", "WWW", ".", "GOOGLE", ".", "COM", "/."])
 
-    def testSplitNonUnicode(self):
-        self.assertRaises(TypeError, self.tokenizer.split, "foo")
-
     def testSplitApostrophe(self):
         words = self.tokenizer.split("hal's brain")
         self.assertEquals(words, ["HAL'S", " ", "BRAIN", "."])
@@ -152,9 +149,6 @@ class testCobeTokenizer(unittest.TestCase):
     def testSplitApostrophes(self):
         words = self.tokenizer.split("don't :'(")
         self.assertEquals(words, ["don't", " ", ":'("])
-
-    def testSplitNonUnicode(self):
-        self.assertRaises(TypeError, self.tokenizer.split, "foo")
 
     def testJoin(self):
         self.assertEquals("foo bar baz",

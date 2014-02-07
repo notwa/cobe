@@ -9,7 +9,6 @@ import Stemmer
 import sys
 import time
 
-from .bot import Runner
 from .brain import Brain
 
 log = logging.getLogger("cobe")
@@ -94,95 +93,6 @@ class LearnCommand:
             print("\r100%% (%d/s)" % (count / elapsed))
 
         b.stop_batch_learning()
-
-
-class LearnIrcLogCommand:
-    @classmethod
-    def add_subparser(cls, parser):
-        subparser = parser.add_parser("learn-irc-log",
-                                      help="Learn a file of IRC log text")
-        subparser.add_argument("-i", "--ignore-nick", action="append",
-                               dest="ignored_nicks",
-                               help="Ignore an IRC nick")
-        subparser.add_argument("-o", "--only-nick", action="append",
-                               dest="only_nicks",
-                               help="Only learn from specified nicks")
-        subparser.add_argument("-r", "--reply-to", action="append",
-                               help="Reply (invisibly) to things said "
-                               "to specified nick")
-        subparser.add_argument("file", nargs="+")
-        subparser.set_defaults(run=cls.run)
-
-    @classmethod
-    def run(cls, args):
-        b = Brain(args.brain)
-        b.start_batch_learning()
-
-        for filename in args.file:
-            now = time.time()
-            print(filename)
-
-            count = 0
-            for line, progress in progress_generator(filename):
-                show_progress = ((count % 100) == 0)
-
-                if show_progress:
-                    elapsed = time.time() - now
-                    sys.stdout.write("\r%.0f%% (%d/s)" % (progress,
-                                                          count / elapsed))
-                    sys.stdout.flush()
-
-                count = count + 1
-
-                if (count % 1000) == 0:
-                    b.graph.commit()
-
-                parsed = cls._parse_irc_message(line.strip(),
-                                                args.ignored_nicks,
-                                                args.only_nicks)
-                if parsed is None:
-                    continue
-
-                to, msg = parsed
-                b.learn(msg)
-
-                if args.reply_to is not None and to in args.reply_to:
-                    b.reply(msg)
-
-            elapsed = time.time() - now
-            print("\r100%% (%d/s)" % (count / elapsed))
-
-        b.stop_batch_learning()
-
-    @staticmethod
-    def _parse_irc_message(msg, ignored_nicks=None, only_nicks=None):
-        # only match lines of the form "HH:MM <nick> message"
-        match = re.match("\d+:\d+\s+<(.+?)>\s+(.*)", msg)
-        if not match:
-            return None
-
-        nick = match.group(1)
-        msg = match.group(2)
-
-        if ignored_nicks is not None and nick in ignored_nicks:
-            return None
-
-        if only_nicks is not None and nick not in only_nicks:
-            return None
-
-        to = None
-
-        # strip "username: " at the beginning of messages
-        match = re.search("^(\S+)[,:]\s+(\S.*)", msg)
-        if match:
-            to = match.group(1)
-            msg = match.group(2)
-
-        # strip kibot style '"asdf" --user, 06-oct-09' quotes
-        msg = re.sub("\"(.*)\" --\S+,\s+\d+-\S+-\d+",
-                     lambda m: m.group(1), msg)
-
-        return to, msg
 
 
 class ConsoleCommand:
