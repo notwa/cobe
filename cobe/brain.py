@@ -8,9 +8,8 @@ import operator
 import os
 import random
 import re
-import sqlite3
+import psycopg2
 import time
-import types
 
 from .instatrace import trace, trace_ms, trace_us
 from . import scoring
@@ -33,16 +32,13 @@ class Brain:
     # in the tokens table
     SPACE_TOKEN_ID = -1
 
-    def __init__(self, filename, **kwargs):
-        """Construct a brain for the specified filename. If that file
+    def __init__(self, dsn, **kwargs):
+        """Construct a brain for the specified DSN. If that file
         doesn't exist, it will be initialized with the default brain
         settings."""
-        if not os.path.exists(filename):
-            log.info("File does not exist. Assuming defaults.")
-            Brain.init(filename, **kwargs)
 
         with trace_us("Brain.connect_us"):
-            self.graph = graph = Graph(sqlite3.connect(filename, **kwargs))
+            self.graph = graph = Graph(psycopg2.connect(dsn, **kwargs))
 
         version = graph.get_info_text("version")
         if version != "2":
@@ -83,7 +79,6 @@ class Brain:
         called. Learn text using the normal learn(text) method."""
         self._learning = True
 
-        self.graph.cursor().execute("PRAGMA journal_mode=memory")
         self.graph.drop_reply_indexes()
 
     def stop_batch_learning(self):
@@ -91,7 +86,6 @@ class Brain:
         self._learning = False
 
         self.graph.commit()
-        self.graph.cursor().execute("PRAGMA journal_mode=truncate")
         self.graph.ensure_indexes()
 
     def del_stemmer(self):
@@ -112,8 +106,7 @@ class Brain:
         self.graph.commit()
 
     def learn(self, text):
-        """Learn a string of text. If the input is not already
-        Unicode, it will be decoded as utf-8."""
+        """Learn a string of text."""
         tokens = self.tokenizer.split(text)
         trace("Brain.learn_input_token_count", len(tokens))
 
@@ -382,14 +375,14 @@ with its two nodes"""
                         yield prev + n, node
 
     @staticmethod
-    def init(filename, order=3, tokenizer=None, **kwargs):
+    def init(dsn, order=3, tokenizer=None, **kwargs):
         """Initialize a brain. This brain's file must not already exist.
 
 Keyword arguments:
 order -- Order of the forward/reverse Markov chains (integer)
 tokenizer -- One of Cobe, MegaHAL (default Cobe). See documentation
              for cobe.tokenizers for details. (string)"""
-        log.info("Initializing a cobe brain: %s" % filename)
+        log.info("Initializing a cobe brain: %s", dsn)
 
         if tokenizer is None:
             tokenizer = "Cobe"
@@ -398,7 +391,7 @@ tokenizer -- One of Cobe, MegaHAL (default Cobe). See documentation
             log.info("Unknown tokenizer: %s. Using CobeTokenizer", tokenizer)
             tokenizer = "Cobe"
 
-        graph = Graph(sqlite3.connect(filename, **kwargs))
+        graph = Graph(psycopg2.connect(dsn, **kwargs))
 
         with trace_us("Brain.init_time_us"):
             graph.init(order, tokenizer)
@@ -429,10 +422,10 @@ class Reply:
 
 
 class Graph:
-    """A special-purpose graph class, stored in a sqlite3 database"""
+    """A special-purpose graph class, stored in a postgres database"""
     def __init__(self, conn, run_migrations=True):
         self._conn = conn
-        conn.row_factory = sqlite3.Row
+        conn.set_client_encoding('UTF8')
 
         if self.is_initted():
             if run_migrations:
@@ -443,21 +436,9 @@ class Graph:
             self._all_tokens = ",".join(["token%d_id" % i
                                          for i in range(self.order)])
             self._all_tokens_args = " AND ".join(
-                ["token%d_id = ?" % i for i in range(self.order)])
-            self._all_tokens_q = ",".join(["?" for i in range(self.order)])
+                ["token%d_id = %%s" % i for i in range(self.order)])
+            self._all_tokens_q = ",".join(["%s" for i in range(self.order)])
             self._last_token = "token%d_id" % (self.order - 1)
-
-            # Disable the SQLite cache. Its pages tend to get swapped
-            # out, even if the database file is in buffer cache.
-            c = self.cursor()
-            c.execute("PRAGMA cache_size=0")
-            c.execute("PRAGMA page_size=4096")
-
-            # Each of these speed-for-reliability tradeoffs is useful for
-            # bulk learning.
-            c.execute("PRAGMA journal_mode=truncate")
-            c.execute("PRAGMA temp_store=memory")
-            c.execute("PRAGMA synchronous=OFF")
 
     def cursor(self):
         return self._conn.cursor()
@@ -473,35 +454,30 @@ class Graph:
         try:
             self.get_info_text("order")
             return True
-        except sqlite3.OperationalError:
+        except psycopg2.ProgrammingError:
+            self._conn.rollback()
             return False
 
     def set_info_text(self, attribute, text):
         c = self.cursor()
 
         if text is None:
-            q = "DELETE FROM info WHERE attribute = ?"
+            q = "DELETE FROM info WHERE attribute = %s"
             c.execute(q, (attribute,))
         else:
-            q = "UPDATE info SET text = ? WHERE attribute = ?"
+            q = "UPDATE info SET text = %s WHERE attribute = %s"
             c.execute(q, (text, attribute))
 
             if c.rowcount == 0:
-                q = "INSERT INTO info (attribute, text) VALUES (?, ?)"
+                q = "INSERT INTO info (attribute, text) VALUES (%s, %s)"
                 c.execute(q, (attribute, text))
 
-    def get_info_text(self, attribute, default=None, text_factory=None):
+    def get_info_text(self, attribute, default=None):
         c = self.cursor()
 
-        if text_factory is not None:
-            old_text_factory = self._conn.text_factory
-            self._conn.text_factory = text_factory
-
-        q = "SELECT text FROM info WHERE attribute = ?"
-        row = c.execute(q, (attribute,)).fetchone()
-
-        if text_factory is not None:
-            self._conn.text_factory = old_text_factory
+        q = "SELECT text FROM info WHERE attribute = %s"
+        c.execute(q, (attribute,))
+        row = c.fetchone()
 
         if row:
             return row[0]
@@ -521,18 +497,20 @@ class Graph:
     def get_token_by_text(self, text, create=False, stemmer=None):
         c = self.cursor()
 
-        q = "SELECT id FROM tokens WHERE text = ?"
+        q = "SELECT id FROM tokens WHERE text = %s"
 
-        row = c.execute(q, (text,)).fetchone()
+        c.execute(q, (text,))
+        row = c.fetchone()
+
         if row:
             return row[0]
         elif create:
-            q = "INSERT INTO tokens (text, is_word) VALUES (?, ?)"
+            q = "INSERT INTO tokens (text, is_word) VALUES (%s, %s) RETURNING id"
 
             is_word = bool(re.search("\w", text, re.UNICODE))
             c.execute(q, (text, is_word))
 
-            token_id = c.lastrowid
+            token_id, = c.fetchone()
             if stemmer is not None:
                 stem = stemmer.stem(text)
                 if stem is not None:
@@ -541,28 +519,46 @@ class Graph:
             return token_id
 
     def insert_stem(self, token_id, stem):
-        q = "INSERT INTO token_stems (token_id, stem) VALUES (?, ?)"
-        self._conn.execute(q, (token_id, stem))
+        q = "INSERT INTO token_stems (token_id, stem) VALUES (%s, %s)"
+
+        c = self.cursor()
+        c.execute(q, (token_id, stem))
 
     def get_token_stem_id(self, stem):
-        q = "SELECT token_id FROM token_stems WHERE token_stems.stem = ?"
-        rows = self._conn.execute(q, (stem,))
+        q = "SELECT token_id FROM token_stems WHERE token_stems.stem = %s"
+
+        c = self.cursor()
+        c.execute(q, (stem,))
+
+        rows = c.fetchall()
         if rows:
             return list(map(operator.itemgetter(0), rows))
 
     def get_word_tokens(self, token_ids):
-        q = "SELECT id FROM tokens WHERE id IN %s AND is_word = 1" % \
+        if not token_ids:
+            return None
+
+        q = "SELECT id FROM tokens WHERE id IN %s AND is_word" % \
             self.get_seq_expr(token_ids)
 
-        rows = self._conn.execute(q)
+        c = self.cursor()
+        c.execute(q)
+
+        rows = c.fetchall()
         if rows:
             return list(map(operator.itemgetter(0), rows))
 
     def get_tokens(self, token_ids):
+        if not token_ids:
+            return None
+
         q = "SELECT id FROM tokens WHERE id IN %s" % \
             self.get_seq_expr(token_ids)
 
-        rows = self._conn.execute(q)
+        c = self.cursor()
+        c.execute(q)
+
+        rows = c.fetchall()
         if rows:
             return list(map(operator.itemgetter(0), rows))
 
@@ -571,39 +567,49 @@ class Graph:
 
         q = "SELECT id FROM nodes WHERE %s" % self._all_tokens_args
 
-        row = c.execute(q, tokens).fetchone()
+        c.execute(q, tokens)
+        row = c.fetchone()
         if row:
             return int(row[0])
 
         # if not found, create the node
         q = "INSERT INTO nodes (count, %s) " \
-            "VALUES (0, %s)" % (self._all_tokens, self._all_tokens_q)
+            "VALUES (0, %s) RETURNING id" % (self._all_tokens, self._all_tokens_q)
         c.execute(q, tokens)
-        return c.lastrowid
+        id, = c.fetchone()
+        return id
 
     def get_text_by_edge(self, edge_id):
         q = "SELECT tokens.text, edges.has_space FROM nodes, edges, tokens " \
-            "WHERE edges.id = ? AND edges.prev_node = nodes.id " \
+            "WHERE edges.id = %%s AND edges.prev_node = nodes.id " \
             "AND nodes.%s = tokens.id" % self._last_token
 
-        return self._conn.execute(q, (edge_id,)).fetchone()
+        c = self.cursor()
+        c.execute(q, (edge_id,))
+        return c.fetchone()
 
     def get_random_token(self):
         # token 1 is the end_token_id, so we want to generate a random token
         # id from 2..max(id) inclusive.
-        q = "SELECT (abs(random()) % (MAX(id)-1)) + 2 FROM tokens"
-        row = self._conn.execute(q).fetchone()
+        q = "SELECT floor(random() * MAX(id)) + 2 FROM tokens"
+
+        c = self.cursor()
+        c.execute(q)
+        row = c.fetchone()
+
         if row:
             return row[0]
 
     def get_random_node_with_token(self, token_id):
         c = self.cursor()
 
-        q = "SELECT id FROM nodes WHERE token0_id = ? " \
-            "LIMIT 1 OFFSET abs(random())%(SELECT count(*) FROM nodes " \
-            "                              WHERE token0_id = ?)"
+        q = "SELECT id FROM nodes WHERE token0_id = %s " \
+            "OFFSET floor(random() * (SELECT count(id) FROM nodes " \
+            "                         WHERE token0_id = %s))" \
+            "LIMIT 1"
 
-        row = c.execute(q, (token_id, token_id)).fetchone()
+        c.execute(q, (token_id, token_id))
+        row = c.fetchone()
         if row:
             return int(row[0])
 
@@ -614,17 +620,19 @@ class Graph:
 
         c = self.cursor()
         q = "SELECT edges.count, nodes.count FROM edges, nodes " \
-            "WHERE edges.id = ? AND edges.prev_node = nodes.id"
+            "WHERE edges.id = %s AND edges.prev_node = nodes.id"
 
-        edge_count, node_count = c.execute(q, (edge_id,)).fetchone()
+        c.execute(q, (edge_id,))
+        edge_count, node_count = c.fetchone()
         return math.log(edge_count, 2) - math.log(node_count, 2)
 
     def has_space(self, edge_id):
         c = self.cursor()
 
-        q = "SELECT has_space FROM edges WHERE id = ?"
+        q = "SELECT has_space FROM edges WHERE id = %s"
+        c.execute(q, (edge_id,))
 
-        row = c.execute(q, (edge_id,)).fetchone()
+        row = c.fetchone()
         if row:
             return bool(row[0])
 
@@ -634,10 +642,10 @@ class Graph:
         assert type(has_space) == bool
 
         update_q = "UPDATE edges SET count = count + 1 " \
-            "WHERE prev_node = ? AND next_node = ? AND has_space = ?"
+            "WHERE prev_node = %s AND next_node = %s AND has_space = %s"
 
         q = "INSERT INTO edges (prev_node, next_node, has_space, count) " \
-            "VALUES (?, ?, ?, 1)"
+            "VALUES (%s, %s, %s, 1)"
 
         args = (prev_node, next_node, has_space)
 
@@ -645,24 +653,23 @@ class Graph:
         if c.rowcount == 0:
             c.execute(q, args)
 
-        # The count on the next_node in the nodes table must be
-        # incremented here, to register that the node has been seen an
-        # additional time. This is now handled by database triggers.
+        q = "UPDATE nodes SET count = count + 1 WHERE id = %s"
+        c.execute(q, (next_node,))
 
     def search_bfs(self, start_id, end_id, direction):
         if direction:
-            q = "SELECT id, next_node FROM edges WHERE prev_node = ?"
+            q = "SELECT id, next_node FROM edges WHERE prev_node = %s"
         else:
-            q = "SELECT id, prev_node FROM edges WHERE next_node = ?"
+            q = "SELECT id, prev_node FROM edges WHERE next_node = %s"
 
         c = self.cursor()
 
         left = collections.deque([(start_id, tuple())])
         while left:
             cur, path = left.popleft()
-            rows = c.execute(q, (cur,))
+            c.execute(q, (cur,))
 
-            for rowid, next in rows:
+            for rowid, next in c.fetchall():
                 newpath = path + (rowid,)
 
                 if next == end_id:
@@ -674,27 +681,27 @@ class Graph:
         """Walk once randomly from start_id to end_id."""
         if direction:
             q = "SELECT id, next_node " \
-                "FROM edges WHERE prev_node = :last " \
-                "LIMIT 1 OFFSET abs(random())%(SELECT count(*) from edges " \
-                "                              WHERE prev_node = :last)"
+                "FROM edges WHERE prev_node = %(next)s " \
+                "LIMIT 1 OFFSET floor(random() * (SELECT count(*) from edges " \
+                "                                 WHERE prev_node = %(next)s))"
         else:
             q = "SELECT id, prev_node " \
-                "FROM edges WHERE next_node = :last " \
-                "LIMIT 1 OFFSET abs(random())%(SELECT count(*) from edges " \
-                "                              WHERE next_node = :last)"
+                "FROM edges WHERE next_node = %(next)s " \
+                "LIMIT 1 OFFSET floor(random() * (SELECT count(*) from edges " \
+                "                                 WHERE next_node = %(next)s))"
 
         c = self.cursor()
 
         left = collections.deque([(start_id, tuple())])
         while left:
             cur, path = left.popleft()
-            rows = c.execute(q, dict(last=cur))
+            c.execute(q, {"next": cur})
 
             # Note: the LIMIT 1 above means this list only contains
             # one row. Using a list here so this matches the bfs()
             # code, so the two functions can be more easily combined
             # later.
-            for rowid, next in rows:
+            for rowid, next in c.fetchall():
                 newpath = path + (rowid,)
 
                 if next == end_id:
@@ -708,41 +715,41 @@ class Graph:
         log.debug("Creating table: info")
         c.execute("""
 CREATE TABLE info (
-    attribute TEXT NOT NULL PRIMARY KEY,
-    text TEXT NOT NULL)""")
+    attribute text NOT NULL PRIMARY KEY,
+    text text NOT NULL)""")
 
         log.debug("Creating table: tokens")
         c.execute("""
 CREATE TABLE tokens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT UNIQUE NOT NULL,
-    is_word INTEGER NOT NULL)""")
+    id serial PRIMARY KEY,
+    text text UNIQUE NOT NULL,
+    is_word boolean NOT NULL)""")
 
         tokens = []
         for i in range(order):
-            tokens.append("token%d_id INTEGER REFERENCES token(id)" % i)
+            tokens.append("token%d_id integer REFERENCES tokens(id)" % i)
 
         log.debug("Creating table: token_stems")
         c.execute("""
 CREATE TABLE token_stems (
-    token_id INTEGER,
-    stem TEXT NOT NULL)""")
+    token_id integer,
+    stem text NOT NULL)""")
 
         log.debug("Creating table: nodes")
         c.execute("""
 CREATE TABLE nodes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    count INTEGER NOT NULL,
+    id serial PRIMARY KEY,
+    count integer NOT NULL,
     %s)""" % ',\n    '.join(tokens))
 
         log.debug("Creating table: edges")
         c.execute("""
 CREATE TABLE edges (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    prev_node INTEGER NOT NULL REFERENCES nodes(id),
-    next_node INTEGER NOT NULL REFERENCES nodes(id),
-    count INTEGER NOT NULL,
-    has_space INTEGER NOT NULL)""")
+    id serial PRIMARY KEY,
+    prev_node integer NOT NULL REFERENCES nodes(id),
+    next_node integer NOT NULL REFERENCES nodes(id),
+    has_space boolean NOT NULL,
+    count integer NOT NULL)""")
 
         if run_migrations:
             self._run_migrations()
@@ -762,13 +769,33 @@ CREATE TABLE edges (
 
         self.close()
 
-    def drop_reply_indexes(self):
-        self._conn.execute("DROP INDEX IF EXISTS edges_all_next")
-        self._conn.execute("DROP INDEX IF EXISTS edges_all_prev")
+    def _if_index_not_exists(self, index_name, query):
+        return """
+DO $$
+BEGIN
+IF NOT EXISTS (
+    SELECT 1
+    FROM   pg_class c
+    JOIN   pg_namespace n ON n.oid = c.relnamespace
+    WHERE  c.relname = '{index_name}'
+    AND    n.nspname = 'public'
+    ) THEN
 
-        self._conn.execute("""
-CREATE INDEX IF NOT EXISTS learn_index ON edges
-    (prev_node, next_node)""")
+    {query};
+END IF;
+
+END$$
+""".format(index_name=index_name, query=query.strip().rstrip(";"))
+
+    def drop_reply_indexes(self):
+        c = self.cursor()
+        c.execute("DROP INDEX IF EXISTS edges_all_next")
+        c.execute("DROP INDEX IF EXISTS edges_all_prev")
+
+        c.execute(self._if_index_not_exists("learn_index", """
+CREATE INDEX learn_index
+    ON edges
+    (prev_node, next_node)"""))
 
     def ensure_indexes(self):
         c = self.cursor()
@@ -777,17 +804,20 @@ CREATE INDEX IF NOT EXISTS learn_index ON edges
         c.execute("DROP INDEX IF EXISTS learn_index")
 
         token_ids = ",".join(["token%d_id" % i for i in range(self.order)])
-        c.execute("""
-CREATE UNIQUE INDEX IF NOT EXISTS nodes_token_ids on nodes
-    (%s)""" % token_ids)
+        c.execute(self._if_index_not_exists("nodes_token_ids", """
+CREATE UNIQUE INDEX nodes_token_ids
+    ON nodes
+    (%s);
+""" % token_ids))
 
-        c.execute("""
-CREATE UNIQUE INDEX IF NOT EXISTS edges_all_next ON edges
-    (next_node, prev_node, has_space, count)""")
+        c.execute(self._if_index_not_exists("edges_all_next", """
+CREATE UNIQUE INDEX edges_all_next
+    ON edges
+    (next_node, prev_node, has_space)"""))
 
-        c.execute("""
-CREATE UNIQUE INDEX IF NOT EXISTS edges_all_prev ON edges
-    (prev_node, next_node, has_space, count)""")
+        c.execute(self._if_index_not_exists("edges_all_prev", """
+CREATE UNIQUE INDEX edges_all_prev ON edges
+    (prev_node, next_node, has_space)"""))
 
     def delete_token_stems(self):
         c = self.cursor()
@@ -807,12 +837,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS edges_all_prev ON edges
             c = self.cursor()
 
             insert_c = self.cursor()
-            insert_q = "INSERT INTO token_stems (token_id, stem) VALUES (?, ?)"
+            insert_q = "INSERT INTO token_stems (token_id, stem) VALUES (%s, %s)"
 
-            q = c.execute("""
+            c.execute("""
 SELECT id, text FROM tokens""")
 
-            for row in q:
+            for row in c.fetchall():
                 stem = stemmer.stem(row[1])
                 if stem is not None:
                     insert_c.execute(insert_q, (row[0], stem))
@@ -828,32 +858,10 @@ CREATE INDEX token_stems_stem on token_stems (stem)""")
     def _run_migrations(self):
         with trace_us("Db.run_migrations_us"):
             self._maybe_drop_tokens_text_index()
-            self._maybe_create_node_count_triggers()
 
     def _maybe_drop_tokens_text_index(self):
         # tokens_text was an index on tokens.text, deemed redundant since
         # tokens.text is declared UNIQUE, and sqlite automatically creates
         # indexes for UNIQUE columns
-        self._conn.execute("DROP INDEX IF EXISTS tokens_text")
-
-    def _maybe_create_node_count_triggers(self):
-        # Create triggers on the edges table to update nodes counts.
-        # In previous versions, the node counts were updated with a
-        # separate query. Moving them into triggers improves
-        # performance.
         c = self.cursor()
-
-        c.execute("""
-CREATE TRIGGER IF NOT EXISTS edges_insert_trigger AFTER INSERT ON edges
-    BEGIN UPDATE nodes SET count = count + NEW.count
-        WHERE nodes.id = NEW.next_node; END;""")
-
-        c.execute("""
-CREATE TRIGGER IF NOT EXISTS edges_update_trigger AFTER UPDATE ON edges
-    BEGIN UPDATE nodes SET count = count + (NEW.count - OLD.count)
-        WHERE nodes.id = NEW.next_node; END;""")
-
-        c.execute("""
-CREATE TRIGGER IF NOT EXISTS edges_delete_trigger AFTER DELETE ON edges
-    BEGIN UPDATE nodes SET count = count - old.count
-        WHERE nodes.id = OLD.next_node; END;""")
+        c.execute("DROP INDEX IF EXISTS tokens_text")

@@ -3,7 +3,6 @@
 import atexit
 import logging
 import os
-import re
 import readline
 import Stemmer
 import sys
@@ -76,7 +75,7 @@ class LearnCommand:
 
             count = 0
             for line, progress in progress_generator(filename):
-                show_progress = ((count % 1000) == 0)
+                show_progress = ((count % 100) == 0)
 
                 if show_progress:
                     elapsed = time.time() - now
@@ -121,38 +120,7 @@ class ConsoleCommand:
                 sys.exit(0)
 
             b.learn(cmd)
-            print(b.reply(cmd).encode("utf-8"))
-
-
-class IrcClientCommand:
-    @classmethod
-    def add_subparser(cls, parser):
-        subparser = parser.add_parser("irc-client",
-                                      help="IRC client [requires twisted]")
-        subparser.add_argument("-s", "--server", required=True,
-                               help="IRC server hostname")
-        subparser.add_argument("-p", "--port", type=int, default=6667,
-                               help="IRC server port")
-        subparser.add_argument("-n", "--nick", default="cobe",
-                               help="IRC nick")
-        subparser.add_argument("-c", "--channel", required=True,
-                               help="IRC channel")
-        subparser.add_argument("-l", "--log-channel",
-                               help="IRC channel for logging")
-        subparser.add_argument("-i", "--ignore-nick", action="append",
-                               dest="ignored_nicks",
-                               help="Ignore an IRC nick")
-        subparser.add_argument("-o", "--only-nick", action="append",
-                               dest="only_nicks",
-                               help="Only learn from a specific IRC nick")
-
-        subparser.set_defaults(run=cls.run)
-
-    @staticmethod
-    def run(args):
-        b = Brain(args.brain)
-
-        Runner().run(b, args)
+            print(b.reply(cmd))
 
 
 class SetStemmerCommand:

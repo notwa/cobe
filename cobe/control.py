@@ -1,5 +1,4 @@
 import argparse
-import codecs
 import logging
 import sys
 
@@ -15,7 +14,6 @@ parser.add_argument("--instatrace", metavar="FILE",
 subparsers = parser.add_subparsers(title="Commands")
 commands.ConsoleCommand.add_subparser(subparsers)
 commands.InitCommand.add_subparser(subparsers)
-commands.IrcClientCommand.add_subparser(subparsers)
 commands.LearnCommand.add_subparser(subparsers)
 commands.SetStemmerCommand.add_subparser(subparsers)
 commands.DelStemmerCommand.add_subparser(subparsers)
@@ -25,7 +23,7 @@ def main():
     args = parser.parse_args()
 
     formatter = logging.Formatter("%(levelname)s: %(message)s")
-    console = logging.StreamHandler(codecs.getwriter('utf8')(sys.stderr))
+    console = logging.StreamHandler(sys.stderr)
     console.setFormatter(formatter)
     logging.root.addHandler(console)
 
@@ -37,11 +35,7 @@ def main():
     if args.instatrace:
         instatrace.init_trace(args.instatrace)
 
-    try:
-        args.run(args)
-    except KeyboardInterrupt:
-        print()
-        sys.exit(1)
+    args.run(args)
 
 if __name__ == "__main__":
     main()
